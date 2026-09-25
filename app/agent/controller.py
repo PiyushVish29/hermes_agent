@@ -13,6 +13,8 @@ from app import __version__
 from app.config.settings import Settings
 from app.agent.state import AgentEvent, AgentPlan, AgentState, AgentTask, ToolCall, ToolError, ToolResult
 from app.filesystem import ListDirectoryTool, PathSecurityLayer, ReadFileTool, SearchFilesTool
+from app.memory.manager import MemoryManager
+from app.memory.models import MemoryCandidate, MemoryCandidateStatus, MemoryTaskCheckpoint
 from app.models.provider import ModelError, ModelProvider, ModelRequest, ModelResponse, ToolDefinition
 from app.security.permissions import PermissionEngine, PermissionLevel, PermissionPolicy, PermissionRequest
 from app.tools.base import ToolValidationError
@@ -20,6 +22,14 @@ from app.tools.calculator import CalculatorTool
 from app.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
+
+
+class MemoryApprovalRequired(RuntimeError):
+    """Raised to pause a task while the host presents a memory decision."""
+
+    def __init__(self, candidate: MemoryCandidate) -> None:
+        super().__init__("User memory approval is required")
+        self.candidate = candidate
 
 
 @dataclass
@@ -32,7 +42,13 @@ class AgentController:
     state: AgentState = AgentState.IDLE
     tool_registry: ToolRegistry | None = None
     permission_engine: PermissionEngine | None = None
+    memory_manager: MemoryManager | None = None
     events: list[AgentEvent] = field(default_factory=list)
+    _active_task: AgentTask | None = field(default=None, init=False, repr=False)
+    _active_conversation: tuple[dict[str, object], ...] = field(default=(), init=False, repr=False)
+    _active_iteration: int = field(default=1, init=False, repr=False)
+    _pending_memory_candidate: MemoryCandidate | None = field(default=None, init=False, repr=False)
+    _suspended_task_id: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.tool_registry is None:
@@ -85,11 +101,23 @@ class AgentController:
         conversation: tuple[dict[str, object], ...] = (
             {"role": "user", "content": goal},
         )
+        return self._run_task_state(task, conversation, 1)
+
+    def _run_task_state(
+        self,
+        task: AgentTask,
+        conversation: tuple[dict[str, object], ...],
+        start_iteration: int,
+    ) -> ModelResponse:
+        self._active_task = task
+        self._active_conversation = conversation
         self.state = AgentState.IDLE
         self.events.clear()
         self._record(task, "task_started", AgentState.IDLE)
 
-        for iteration in range(1, task.max_iterations + 1):
+        for iteration in range(start_iteration, task.max_iterations + 1):
+            self._active_iteration = iteration
+            self._active_conversation = conversation
             if self.state == AgentState.CANCELLED:
                 raise RuntimeError("Agent task was cancelled")
             self.state = AgentState.THINKING
@@ -97,7 +125,7 @@ class AgentController:
             try:
                 response = self.generate(
                     ModelRequest(
-                        prompt=goal,
+                        prompt=task.goal,
                         conversation=conversation,
                         tools=self._tool_definitions(),
                         timeout_seconds=self.settings.tool_timeout_seconds,
@@ -128,10 +156,47 @@ class AgentController:
             self.state = AgentState.OBSERVING
             self._record(task, "tool_results_received", self.state, count=len(results))
             conversation = self._append_results(conversation, response, results)
+            self._active_conversation = conversation
 
         self.state = AgentState.FAILED
         self._record(task, "iteration_limit_reached", self.state, limit=task.max_iterations)
         raise RuntimeError("Agent maximum iterations exceeded")
+
+    def propose_memory_for_current_task(self, candidate: MemoryCandidate) -> MemoryCandidate:
+        """Process a candidate and pause the active task if user approval is needed."""
+        if self.memory_manager is None or self._active_task is None:
+            raise RuntimeError("No active task memory workflow is configured")
+        processed = self.memory_manager.propose_candidate(candidate)
+        if processed.status is not MemoryCandidateStatus.PENDING:
+            return processed
+        self.memory_manager.suspend_task(
+            task_id=self._active_task.task_id,
+            goal=self._active_task.goal,
+            max_iterations=self._active_task.max_iterations,
+            iteration=self._active_iteration,
+            conversation=self._active_conversation,
+            agent_state=AgentState.WAITING_FOR_APPROVAL.value,
+        )
+        self._pending_memory_candidate = processed
+        self._suspended_task_id = self._active_task.task_id
+        self.state = AgentState.WAITING_FOR_APPROVAL
+        self._record(self._active_task, "memory_approval_required", self.state)
+        raise MemoryApprovalRequired(processed)
+
+    def resume_memory_task(self, *, approve: bool) -> ModelResponse:
+        """Resolve pending memory approval and continue the exact suspended task."""
+        if self.memory_manager is None or self._pending_memory_candidate is None or self._suspended_task_id is None:
+            raise RuntimeError("No memory approval is pending")
+        candidate = self._pending_memory_candidate
+        if approve:
+            self.memory_manager.approve_memory(candidate.candidate_id)
+        else:
+            self.memory_manager.reject_memory(candidate.candidate_id)
+        checkpoint = self.memory_manager.resume_task(self._suspended_task_id)
+        self._pending_memory_candidate = None
+        self._suspended_task_id = None
+        resumed_task = AgentTask(checkpoint.task_id, checkpoint.goal, checkpoint.max_iterations)
+        return self._run_task_state(resumed_task, checkpoint.conversation, checkpoint.iteration)
 
     def cancel(self) -> None:
         """Request cancellation before the next model or tool step."""

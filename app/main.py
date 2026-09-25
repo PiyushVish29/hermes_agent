@@ -7,6 +7,7 @@ import argparse
 from app import __version__
 from app.agent.controller import AgentController
 from app.config.settings import Settings
+from app.memory.manager import MemoryManager
 from app.models.factory import ModelProviderFactory
 from app.models.provider import ModelError
 from app.utils.logging import configure_logging
@@ -60,7 +61,8 @@ def main() -> int:
     configure_logging(settings.log_level)
 
     provider = ModelProviderFactory.create(settings) if args.chat else None
-    controller = AgentController(settings, model_provider=provider)
+    memory_manager = MemoryManager(settings.memory_database_location)
+    controller = AgentController(settings, model_provider=provider, memory_manager=memory_manager)
     controller.start()
     try:
         if args.chat:

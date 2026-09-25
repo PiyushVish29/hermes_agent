@@ -14,7 +14,7 @@ The application does **not** execute arbitrary code, control the computer, brows
 - `app/tools/`: explicit tool contracts and `ToolRegistry`. Tools must be registered before they can be considered by future orchestration.
 - `app/filesystem/`: path security and read-only filesystem tools. Access is limited to configured roots, blocked sensitive paths, and a file-size limit.
 - `app/security/`: policy boundary. `PermissionEngine` currently denies all requests by default.
-- `app/memory/`: future bounded, auditable memory ownership.
+- `app/memory/`: short-term session context and approval-gated SQLite long-term memory.
 - `app/rag/`: future retrieval boundary over approved local indexes.
 - `app/config/`: typed, allowlisted environment configuration.
 - `app/utils/`: shared infrastructure such as logging.
