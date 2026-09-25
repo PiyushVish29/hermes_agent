@@ -10,7 +10,7 @@ The application does **not** connect to an LLM, execute arbitrary code, access f
 
 - `app/main.py`: CLI entry point and process lifecycle wiring.
 - `app/agent/`: application orchestration. `AgentController` owns start/status/shutdown state.
-- `app/models/`: model-provider contract. Future local or hosted adapters implement `ModelProvider`; the controller does not depend on a vendor SDK.
+- `app/models/`: provider-neutral model contracts, factory, and mock adapter. Future local or hosted adapters implement `ModelProvider`; the controller does not depend on a vendor SDK.
 - `app/tools/`: explicit tool contracts and `ToolRegistry`. Tools must be registered before they can be considered by future orchestration.
 - `app/security/`: policy boundary. `PermissionEngine` currently denies all requests by default.
 - `app/memory/`: future bounded, auditable memory ownership.
@@ -23,6 +23,18 @@ The application does **not** connect to an LLM, execute arbitrary code, access f
 ## Dependency choices
 
 The runtime uses only the Python standard library. `pytest` is listed for development tests. Avoiding an LLM SDK and agent framework at this stage keeps startup deterministic and makes future model replacement an adapter decision rather than an architectural rewrite.
+
+## Model providers
+
+The agent communicates through `ModelProvider.generate(ModelRequest)` and never
+calls Ollama or another vendor directly. A response may contain text,
+structured data, tool-call requests, and model metadata. Provider failures use
+`ModelError`, with `ModelTimeoutError` for deadlines. To add a provider, create
+an adapter implementing the contract, normalize its responses, translate its
+errors, and register it with `ModelProviderFactory`. No agent, tool, security,
+memory, or RAG changes should be needed. The current factory only provides the
+deterministic `mock` adapter; a real Ollama connection is intentionally not
+implemented.
 
 ## Security boundaries
 
@@ -59,6 +71,7 @@ From the project root:
 ```powershell
 python -m app.main --status
 python -m app.main --version
+python -m app.main --chat
 ```
 
 Expected status output:
@@ -66,6 +79,16 @@ Expected status output:
 ```text
 Hermes Local 0.1.0 - running - model: disconnected
 ```
+
+With `--chat`, the flow is:
+
+`User goal -> AgentController -> ModelProvider -> model decision -> validated calculator request -> calculator -> ToolResult -> ModelProvider -> final response`
+
+Hermes sends each text prompt through the configured provider to Ollama and
+prints the normalized response. Only registered tools can be requested, every
+request is permission-checked, and failures are returned to the model as
+structured results so it can recover. No filesystem, terminal, browser, or
+computer-control tools exist at this stage.
 
 ## Test
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.tools.base import Tool
+from app.tools.base import Tool, ToolValidationError
 
 
 class ToolRegistry:
@@ -20,6 +20,14 @@ class ToolRegistry:
     def get(self, name: str) -> Tool | None:
         """Return an approved tool, if present."""
         return self._tools.get(name)
+
+    def validate(self, name: str, arguments: dict[str, object]) -> Tool:
+        """Retrieve and validate a registered tool before any execution."""
+        tool = self.get(name)
+        if tool is None:
+            raise ToolValidationError(f"tool is not registered: {name}", code="unknown_tool")
+        tool.validate(arguments)
+        return tool
 
     def names(self) -> tuple[str, ...]:
         """Return registered names in deterministic order."""
