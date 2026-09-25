@@ -35,10 +35,18 @@ class SecurityPolicy:
     allowed_filesystem_roots: tuple[Path, ...] = (Path("data/sandbox"),)
     blocked_filesystem_patterns: tuple[str, ...] = (
         "**/.env",
+        "**/.env.*",
         "**/.ssh/**",
+        "**/.aws/**",
+        "**/credentials*",
+        "**/secrets*",
+        "**/id_rsa*",
         "**/*.key",
         "**/*.pem",
+        "**/*.p12",
+        "**/*.pfx",
     )
+    max_filesystem_file_size_bytes: int = 1_048_576
 
     def __post_init__(self) -> None:
         roots = tuple(
@@ -50,11 +58,17 @@ class SecurityPolicy:
             raise ConfigurationError("allowed_filesystem_roots must not be empty")
         if any(not pattern for pattern in patterns):
             raise ConfigurationError("blocked_filesystem_patterns must not contain empty values")
+        if self.max_filesystem_file_size_bytes < 1 or self.max_filesystem_file_size_bytes > 100 * 1024 * 1024:
+            raise ConfigurationError("max_filesystem_file_size_bytes must be between 1 and 104857600")
         object.__setattr__(self, "allowed_filesystem_roots", roots)
         object.__setattr__(self, "blocked_filesystem_patterns", patterns)
 
     @classmethod
-    def from_environment(cls, environ: dict[str, str] | None = None) -> "SecurityPolicy":
+    def from_environment(
+        cls,
+        environ: dict[str, str] | None = None,
+        max_filesystem_file_size_bytes: int | None = None,
+    ) -> "SecurityPolicy":
         """Load policy and fail closed when its allowlist is absent or invalid."""
         values = os.environ if environ is None else environ
         raw_roots = values.get("HERMES_ALLOWED_FILESYSTEM_ROOTS")
@@ -67,7 +81,15 @@ class SecurityPolicy:
             if raw_patterns is not None
             else cls().blocked_filesystem_patterns
         )
-        return cls(allowed_filesystem_roots=roots, blocked_filesystem_patterns=patterns)
+        return cls(
+            allowed_filesystem_roots=roots,
+            blocked_filesystem_patterns=patterns,
+            max_filesystem_file_size_bytes=(
+                cls().max_filesystem_file_size_bytes
+                if max_filesystem_file_size_bytes is None
+                else max_filesystem_file_size_bytes
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -112,6 +134,12 @@ class Settings:
         try:
             max_agent_iterations = int(get("HERMES_MAX_AGENT_ITERATIONS", str(cls.max_agent_iterations)))
             tool_timeout_seconds = float(get("HERMES_TOOL_TIMEOUT_SECONDS", str(cls.tool_timeout_seconds)))
+            max_filesystem_file_size_bytes = int(
+                get(
+                    "HERMES_MAX_FILESYSTEM_FILE_SIZE_BYTES",
+                    str(cls.security_policy.max_filesystem_file_size_bytes),
+                )
+            )
         except ValueError as error:
             raise ConfigurationError("numeric configuration values are invalid") from error
 
@@ -125,5 +153,5 @@ class Settings:
             tool_timeout_seconds=tool_timeout_seconds,
             memory_database_location=Path(get("HERMES_MEMORY_DATABASE", str(cls.memory_database_location))),
             rag_database_location=Path(get("HERMES_RAG_DATABASE", str(cls.rag_database_location))),
-            security_policy=SecurityPolicy.from_environment(values),
+            security_policy=SecurityPolicy.from_environment(values, max_filesystem_file_size_bytes),
         )

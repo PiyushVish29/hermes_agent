@@ -15,3 +15,7 @@ A tool must not invoke another tool internally; a separate model request must
 go through the same registry and permission path. This leaves room for future
 task/session approvals, sandbox policies, and sensitive-data policies without
 changing the agent contract.
+
+Filesystem roots, blocked patterns, and the maximum readable file size are
+configured outside the model through `SecurityPolicy` and environment-backed
+application settings.

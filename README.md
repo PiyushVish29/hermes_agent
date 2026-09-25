@@ -4,7 +4,7 @@ Hermes Local is a privacy-first, Windows-focused AI computer agent. This reposit
 
 ## Milestone boundary
 
-The application does **not** connect to an LLM, execute arbitrary code, access files, control the computer, browse the web, persist memory, or perform retrieval. The interfaces for future capabilities are present only to establish clean ownership boundaries.
+The application does **not** execute arbitrary code, control the computer, browse the web, persist memory, or perform retrieval. It includes only bounded, read-only filesystem tools for configured roots: `list_directory`, `search_files`, and `read_file`.
 
 ## Architecture
 
@@ -12,6 +12,7 @@ The application does **not** connect to an LLM, execute arbitrary code, access f
 - `app/agent/`: application orchestration. `AgentController` owns start/status/shutdown state.
 - `app/models/`: provider-neutral model contracts, factory, and mock adapter. Future local or hosted adapters implement `ModelProvider`; the controller does not depend on a vendor SDK.
 - `app/tools/`: explicit tool contracts and `ToolRegistry`. Tools must be registered before they can be considered by future orchestration.
+- `app/filesystem/`: path security and read-only filesystem tools. Access is limited to configured roots, blocked sensitive paths, and a file-size limit.
 - `app/security/`: policy boundary. `PermissionEngine` currently denies all requests by default.
 - `app/memory/`: future bounded, auditable memory ownership.
 - `app/rag/`: future retrieval boundary over approved local indexes.
@@ -38,7 +39,7 @@ implemented.
 
 ## Security boundaries
 
-The model must never become the security boundary. Future model output will be treated as untrusted intent. The agent layer will request named tools, the registry will expose only approved tools, and the permission engine will make explicit policy decisions before execution. No unrestricted filesystem, shell, Python, PowerShell, CMD, browser, or desktop-control capability exists in this milestone.
+The model must never become the security boundary. Future model output will be treated as untrusted intent. The agent layer will request named tools, the registry will expose only approved tools, and the permission engine will make explicit policy decisions before execution. No unrestricted filesystem, write, delete, shell, Python, PowerShell, CMD, browser, or desktop-control capability exists in this milestone. Filesystem access is always resolved and permission-checked before I/O.
 
 ## Configuration
 
@@ -60,6 +61,7 @@ HERMES_MAX_AGENT_ITERATIONS=10
 HERMES_TOOL_TIMEOUT_SECONDS=30
 HERMES_ALLOWED_FILESYSTEM_ROOTS=data/sandbox
 HERMES_BLOCKED_FILESYSTEM_PATTERNS=**/.env;**/.ssh/**;**/*.key;**/*.pem
+HERMES_MAX_FILESYSTEM_FILE_SIZE_BYTES=1048576
 HERMES_MEMORY_DATABASE=data/memory/hermes.sqlite3
 HERMES_RAG_DATABASE=data/rag/hermes.sqlite3
 ```

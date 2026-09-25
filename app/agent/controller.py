@@ -12,6 +12,7 @@ from typing import Any
 from app import __version__
 from app.config.settings import Settings
 from app.agent.state import AgentEvent, AgentPlan, AgentState, AgentTask, ToolCall, ToolError, ToolResult
+from app.filesystem import ListDirectoryTool, PathSecurityLayer, ReadFileTool, SearchFilesTool
 from app.models.provider import ModelError, ModelProvider, ModelRequest, ModelResponse, ToolDefinition
 from app.security.permissions import PermissionEngine, PermissionLevel, PermissionPolicy, PermissionRequest
 from app.tools.base import ToolValidationError
@@ -44,6 +45,15 @@ class AgentController:
                 if name == "calculator"
             }
             self.permission_engine = PermissionEngine(PermissionPolicy(safe_defaults))
+        if self.tool_registry is not None and self.permission_engine is not None:
+            security = PathSecurityLayer(self.settings.security_policy)
+            for tool in (
+                ListDirectoryTool(security, self.permission_engine),
+                SearchFilesTool(security, self.permission_engine),
+                ReadFileTool(security, self.permission_engine),
+            ):
+                if self.tool_registry.get(tool.name) is None:
+                    self.tool_registry.register(tool)
 
     def start(self) -> None:
         """Initialize the safe application shell."""
