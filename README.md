@@ -28,6 +28,30 @@ The runtime uses only the Python standard library. `pytest` is listed for develo
 
 The model must never become the security boundary. Future model output will be treated as untrusted intent. The agent layer will request named tools, the registry will expose only approved tools, and the permission engine will make explicit policy decisions before execution. No unrestricted filesystem, shell, Python, PowerShell, CMD, browser, or desktop-control capability exists in this milestone.
 
+## Configuration
+
+Copy `.env.example` to `.env` and export those values before starting Hermes.
+`HERMES_ALLOWED_FILESYSTEM_ROOTS` is required; Hermes fails closed when that
+security setting is missing or unsafe. Roots are separated with `;` on Windows.
+The default root is only `data/sandbox`, never the user's entire filesystem.
+Database paths are reserved for future persistence and are not accessed in this
+milestone.
+
+Example (no secrets are required):
+
+```dotenv
+HERMES_MODEL_PROVIDER=ollama
+HERMES_MODEL=llama3.2
+HERMES_OLLAMA_HOST=http://127.0.0.1:11434
+HERMES_LOG_LEVEL=INFO
+HERMES_MAX_AGENT_ITERATIONS=10
+HERMES_TOOL_TIMEOUT_SECONDS=30
+HERMES_ALLOWED_FILESYSTEM_ROOTS=data/sandbox
+HERMES_BLOCKED_FILESYSTEM_PATTERNS=**/.env;**/.ssh/**;**/*.key;**/*.pem
+HERMES_MEMORY_DATABASE=data/memory/hermes.sqlite3
+HERMES_RAG_DATABASE=data/rag/hermes.sqlite3
+```
+
 ## Run
 
 From the project root:
