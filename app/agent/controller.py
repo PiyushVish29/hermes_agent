@@ -13,7 +13,7 @@ from app import __version__
 from app.config.settings import Settings
 from app.agent.state import AgentEvent, AgentPlan, AgentState, AgentTask, ToolCall, ToolError, ToolResult
 from app.models.provider import ModelError, ModelProvider, ModelRequest, ModelResponse, ToolDefinition
-from app.security.permissions import PermissionEngine
+from app.security.permissions import PermissionEngine, PermissionLevel, PermissionPolicy, PermissionRequest
 from app.tools.base import ToolValidationError
 from app.tools.calculator import CalculatorTool
 from app.tools.registry import ToolRegistry
@@ -38,7 +38,12 @@ class AgentController:
             self.tool_registry = ToolRegistry()
             self.tool_registry.register(CalculatorTool())
         if self.permission_engine is None:
-            self.permission_engine = PermissionEngine(frozenset(self.tool_registry.names()))
+            safe_defaults = {
+                getattr(self.tool_registry.get(name), "permission_requirement", name): PermissionLevel.SAFE
+                for name in self.tool_registry.names()
+                if name == "calculator"
+            }
+            self.permission_engine = PermissionEngine(PermissionPolicy(safe_defaults))
 
     def start(self) -> None:
         """Initialize the safe application shell."""
@@ -136,14 +141,22 @@ class AgentController:
             )
             self._record(task, "tool_rejected", AgentState.WAITING_FOR_APPROVAL, iteration=iteration, tool=call.name)
             return result
-        if not self.permission_engine or not self.permission_engine.is_allowed(
-            call.name, call.arguments, tool.permission_requirement
-        ):
+        permission_request = PermissionRequest(
+            action=call.name,
+            permission_requirement=tool.permission_requirement,
+            arguments=call.arguments,
+            request_id=call.call_id,
+        )
+        decision = self.permission_engine.decide(permission_request) if self.permission_engine else None
+        if decision is None or not decision.permitted:
             result = ToolResult(
                 call.call_id,
                 call.name,
                 False,
-                error=ToolError("permission_denied", "tool request was not approved"),
+                error=ToolError(
+                    "permission_denied",
+                    decision.reason if decision else "permission engine is unavailable",
+                ),
             )
             self._record(task, "tool_rejected", AgentState.WAITING_FOR_APPROVAL, iteration=iteration, tool=call.name)
             return result

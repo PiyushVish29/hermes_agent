@@ -6,6 +6,7 @@ from app.agent.controller import AgentController
 from app.config.settings import Settings
 from app.models.mock import MockModelProvider
 from app.models.provider import ModelResponse, ToolCallRequest
+from app.security.permissions import PermissionEngine, PermissionLevel, PermissionPolicy
 from app.tools.base import Tool, ToolValidationError
 from app.tools.calculator import CalculatorTool
 from app.tools.registry import ToolRegistry
@@ -66,6 +67,9 @@ def test_execution_failure_is_returned_as_structured_result() -> None:
         Settings(),
         model_provider=provider,
         tool_registry=registry,
+        permission_engine=PermissionEngine(
+            PermissionPolicy({"failing": PermissionLevel.SAFE})
+        ),
     )
 
     response = controller.run_task("Use the failing tool")

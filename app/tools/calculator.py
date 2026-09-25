@@ -14,6 +14,7 @@ class CalculatorTool(Tool):
 
     name = "calculator"
     description = "Evaluate a basic arithmetic expression."
+    permission_requirement = "calculator"
     input_schema = {
         "type": "object",
         "properties": {"expression": {"type": "string"}},

@@ -109,7 +109,7 @@ def test_ollama_integration_when_available() -> None:
     provider = OllamaModelProvider(
         Settings().ollama_host,
         Settings().active_model,
-        default_timeout_seconds=2,
+        default_timeout_seconds=120,
     )
     try:
         response = provider.generate(ModelRequest("Reply with one short greeting."))
