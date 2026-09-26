@@ -37,11 +37,15 @@ class TerminalTool(Tool):
         policy: CommandPolicy | None = None,
         timeout_seconds: float = 30.0,
         output_limit_bytes: int = 65_536,
+        sandbox_cwd=None,
+        sandbox_mode: bool = False,
     ) -> None:
         self.permission_engine = permission_engine
         self.policy = policy or default_command_policy()
         self.timeout_seconds = timeout_seconds
         self.output_limit_bytes = output_limit_bytes
+        self.sandbox_cwd = sandbox_cwd
+        self.sandbox_mode = sandbox_mode
         self._process: subprocess.Popen[bytes] | None = None
         self._process_lock = threading.Lock()
         self._cancel_requested = threading.Event()
@@ -84,7 +88,7 @@ class TerminalTool(Tool):
         try:
             process = subprocess.Popen(
                 command,
-                cwd=os.getcwd(),
+                cwd=self.sandbox_cwd or os.getcwd(),
                 env=environment,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
@@ -182,6 +186,7 @@ class TerminalTool(Tool):
                 if process.returncode != 0
                 else None
             ),
+            sandbox_mode=self.sandbox_mode,
         )
 
     @staticmethod
@@ -193,6 +198,10 @@ class TerminalTool(Tool):
                 environment[name] = value
         return environment
 
-    @staticmethod
-    def _failure(command: str, code: str, message: str) -> TerminalResult:
-        return TerminalResult(command=command, success=False, error=TerminalError(code, message))
+    def _failure(self, command: str, code: str, message: str) -> TerminalResult:
+        return TerminalResult(
+            command=command,
+            success=False,
+            error=TerminalError(code, message),
+            sandbox_mode=self.sandbox_mode,
+        )

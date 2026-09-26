@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import json
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field, replace
@@ -12,7 +13,9 @@ from typing import Any
 from app import __version__
 from app.config.settings import Settings
 from app.applications import ApplicationTool
+from app.computer import ComputerPolicy, ComputerUseTool, ControlledTestBackend, WindowBounds
 from app.browser import BrowserPolicy, BrowserTool
+from app.agent.emergency import EmergencyStop, EmergencyStopStatus
 from app.agent.state import (
     AgentEvent,
     AgentPlan,
@@ -45,6 +48,10 @@ class MemoryApprovalRequired(RuntimeError):
         self.candidate = candidate
 
 
+class EmergencyStopTriggered(RuntimeError):
+    """Raised when host emergency stop interrupts agent execution."""
+
+
 @dataclass
 class AgentController:
     """Own application lifecycle; future orchestration will be added here."""
@@ -65,6 +72,8 @@ class AgentController:
     current_plan: AgentPlan | None = field(default=None, init=False)
     plan_history: list[AgentPlan] = field(default_factory=list, init=False)
     _replan_count: int = field(default=0, init=False, repr=False)
+    emergency_stop: EmergencyStop = field(default_factory=EmergencyStop)
+    _active_tool: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.tool_registry is None:
@@ -79,6 +88,7 @@ class AgentController:
             safe_defaults["terminal.development"] = PermissionLevel.SAFE
             safe_defaults["browser.safe"] = PermissionLevel.SAFE
             safe_defaults["application.safe"] = PermissionLevel.SAFE
+            safe_defaults["computer.click"] = PermissionLevel.SAFE
             self.permission_engine = PermissionEngine(PermissionPolicy(safe_defaults))
         if self.tool_registry is not None and self.permission_engine is not None:
             security = PathSecurityLayer(self.settings.security_policy)
@@ -102,6 +112,12 @@ class AgentController:
                 ),
                 ApplicationTool(
                     self.permission_engine,
+                    timeout_seconds=self.settings.tool_timeout_seconds,
+                ),
+                ComputerUseTool(
+                    self.permission_engine,
+                    ComputerPolicy(),
+                    ControlledTestBackend(WindowBounds(1, 1)),
                     timeout_seconds=self.settings.tool_timeout_seconds,
                 ),
             ):
@@ -154,6 +170,7 @@ class AgentController:
         self._record(task, "task_started", AgentState.IDLE)
 
         for iteration in range(start_iteration, task.max_iterations + 1):
+            self._raise_if_emergency_stop(task)
             self._active_iteration = iteration
             self._active_conversation = conversation
             if self.state == AgentState.CANCELLED:
@@ -169,6 +186,7 @@ class AgentController:
                         timeout_seconds=self.settings.tool_timeout_seconds,
                     )
                 )
+                self._raise_if_emergency_stop(task)
             except ModelError:
                 self.state = AgentState.FAILED
                 self._record(task, "model_failed", self.state, iteration=iteration)
@@ -206,6 +224,7 @@ class AgentController:
             self.state = AgentState.WAITING_FOR_APPROVAL
             self._record(task, "tool_requests_received", self.state, count=len(plan.tool_calls))
             completed, results = self._execute_plan(task, plan, iteration)
+            self._raise_if_emergency_stop(task)
             self.state = AgentState.OBSERVING
             self._record(task, "tool_results_received", self.state, count=len(results))
             conversation = self._append_results(conversation, response, results)
@@ -234,6 +253,7 @@ class AgentController:
         for index, step in enumerate(plan.steps):
             attempts = 0
             while attempts <= self.settings.max_step_retries:
+                self._raise_if_emergency_stop(task)
                 attempts += 1
                 current = replace(
                     current,
@@ -309,6 +329,7 @@ class AgentController:
         """Resolve pending memory approval and continue the exact suspended task."""
         if self.memory_manager is None or self._pending_memory_candidate is None or self._suspended_task_id is None:
             raise RuntimeError("No memory approval is pending")
+        self._raise_if_emergency_stop(self._active_task)
         candidate = self._pending_memory_candidate
         if approve:
             self.memory_manager.approve_memory(candidate.candidate_id)
@@ -324,7 +345,17 @@ class AgentController:
         """Request cancellation before the next model or tool step."""
         self.state = AgentState.CANCELLED
 
+    def trigger_emergency_stop(self, reason: str = "host emergency stop") -> EmergencyStopStatus:
+        """Stop from the host/UI independently of the LLM."""
+        status = self.emergency_stop.trigger(reason)
+        self.state = AgentState.CANCELLED
+        tool = self._active_tool
+        if tool is not None and hasattr(tool, "cancel"):
+            tool.cancel()
+        return status
+
     def _handle_tool_call(self, task: AgentTask, call: ToolCall, iteration: int) -> ToolResult:
+        self._raise_if_emergency_stop(task)
         try:
             tool = self.tool_registry.validate(call.name, call.arguments) if self.tool_registry else None
             if tool is None:
@@ -361,18 +392,36 @@ class AgentController:
         self.state = AgentState.EXECUTING
         self._record(task, "tool_started", self.state, iteration=iteration, tool=call.name)
         executor = ThreadPoolExecutor(max_workers=1)
+        self._active_tool = tool
         future = executor.submit(tool.execute, call.arguments)
         try:
-            value = future.result(timeout=self.settings.tool_timeout_seconds)
-            result = ToolResult(call.call_id, call.name, True, value=value)
-        except FutureTimeoutError:
-            future.cancel()
-            result = ToolResult(
-                call.call_id,
-                call.name,
-                False,
-                error=ToolError("timeout", "tool execution timed out", retryable=True),
-            )
+            deadline = time.monotonic() + self.settings.tool_timeout_seconds
+            while True:
+                if self.emergency_stop.is_triggered():
+                    future.cancel()
+                    if hasattr(tool, "cancel"):
+                        tool.cancel()
+                    result = ToolResult(
+                        call.call_id,
+                        call.name,
+                        False,
+                        error=ToolError("emergency_stop", "agent execution was emergency-stopped", True),
+                    )
+                    break
+                try:
+                    value = future.result(timeout=0.05)
+                    result = ToolResult(call.call_id, call.name, True, value=value)
+                    break
+                except FutureTimeoutError:
+                    if time.monotonic() >= deadline:
+                        future.cancel()
+                        result = ToolResult(
+                            call.call_id,
+                            call.name,
+                            False,
+                            error=ToolError("timeout", "tool execution timed out", retryable=True),
+                        )
+                        break
         except Exception as error:
             result = ToolResult(
                 call.call_id,
@@ -382,8 +431,17 @@ class AgentController:
             )
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
+            self._active_tool = None
         self._record(task, "tool_finished", self.state, iteration=iteration, tool=call.name, success=result.success)
         return result
+
+    def _raise_if_emergency_stop(self, task: AgentTask | None) -> None:
+        if not self.emergency_stop.is_triggered():
+            return
+        self.state = AgentState.CANCELLED
+        if task is not None:
+            self._record(task, "emergency_stop", self.state)
+        raise EmergencyStopTriggered(self.emergency_stop.status.reason or "host emergency stop")
 
     def _tool_definitions(self) -> tuple[ToolDefinition, ...]:
         if self.tool_registry is None:

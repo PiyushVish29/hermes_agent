@@ -56,3 +56,4 @@ class TerminalResult:
     stdout_truncated: bool = False
     stderr_truncated: bool = False
     error: TerminalError | None = None
+    sandbox_mode: bool = False

@@ -16,6 +16,8 @@ The application does **not** execute arbitrary code, provide unrestricted comput
 - `app/terminal/`: fixed-catalog, non-shell Windows development commands with timeout, cancellation, and output limits.
 - `app/browser/`: isolated, allowlisted browser actions with visible-text extraction and no arbitrary scripting.
 - `app/applications/`: explicit Windows application catalog with launch, status, focus, and approval-gated close operations.
+- `app/computer/`: controlled test-target computer-use actions with screenshot verification; no desktop-wide control.
+- `app/sandbox/`: explicit resettable sandbox-scoped filesystem and terminal facades.
 - `app/security/`: policy boundary. `PermissionEngine` currently denies all requests by default.
 - `app/memory/`: short-term session context and approval-gated SQLite long-term memory.
 - `app/rag/`: separate approved-document indexing, local embeddings, chunk retrieval, and source references.
@@ -39,6 +41,21 @@ configured replan limit. Every recovery tool request goes through the same
 validation and PermissionEngine path. Memory approval pauses preserve the exact
 task checkpoint before execution resumes.
 
+## Emergency stop
+
+The host/UI calls `AgentController.trigger_emergency_stop()` to latch an
+independent stop signal. This mechanism is not exposed to the model and cannot
+be disabled by an LLM request. It prevents new model turns, tools, retries,
+replans, and memory-resume execution; active tools receive their `cancel()`
+hook, pending futures are cancelled where possible, and the controller keeps
+the active task, plan history, and event state for safe shutdown inspection.
+
+The stop is one-way for the current controller session; create a new host
+session to clear it. An already-running OS process, HTTP request, or provider
+call may not be safely interruptible by Python. Hermes requests cooperative
+cancellation, terminates only operations with a safe cancel path, and otherwise
+waits for the underlying operation to return while refusing subsequent work.
+
 ## Dependency choices
 
 The runtime uses only the Python standard library. `pytest` is listed for development tests. Avoiding an LLM SDK and agent framework at this stage keeps startup deterministic and makes future model replacement an adapter decision rather than an architectural rewrite.
@@ -57,7 +74,11 @@ implemented.
 
 ## Security boundaries
 
-The model must never become the security boundary. Future model output will be treated as untrusted intent. The agent layer will request named tools, the registry will expose only approved tools, and the permission engine will make explicit policy decisions before execution. No unrestricted filesystem, write, delete, shell, Python, PowerShell, CMD, arbitrary browser scripting, mouse/keyboard automation, or desktop-control capability exists in this milestone. Filesystem access is always resolved and permission-checked before I/O; terminal and application operations come only from fixed harmless catalogs.
+The model must never become the security boundary. Future model output will be treated as untrusted intent. The agent layer will request named tools, the registry will expose only approved tools, and the permission engine will make explicit policy decisions before execution. No unrestricted filesystem, write, delete, shell, Python, PowerShell, CMD, arbitrary browser scripting, or desktop-wide mouse/keyboard automation exists in this milestone. Filesystem access is always resolved and permission-checked before I/O; terminal, application, and computer-use operations come only from fixed or explicitly configured boundaries.
+
+Sandbox mode is explicit and visibly labeled `SANDBOX MODE`; it never silently
+redirects normal operations. The sandbox root is `data/sandbox/` and can be
+reset without touching real user directories.
 
 ## Configuration
 

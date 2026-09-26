@@ -1,5 +1,7 @@
 """Agent orchestration and structured execution state."""
 
+from app.agent.emergency import EmergencyStop, EmergencyStopStatus
+
 from app.agent.state import (
 	AgentEvent,
 	AgentPlan,
@@ -14,6 +16,8 @@ from app.agent.state import (
 
 __all__ = [
 	"AgentEvent",
+	"EmergencyStop",
+	"EmergencyStopStatus",
 	"AgentPlan",
 	"AgentState",
 	"AgentTask",

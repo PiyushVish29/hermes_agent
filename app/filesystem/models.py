@@ -27,3 +27,4 @@ class FilesystemResult:
     content: str | None = None
     error: FilesystemError | None = None
     match_count: int = 0
+    sandbox_mode: bool = False
