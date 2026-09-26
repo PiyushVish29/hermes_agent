@@ -102,7 +102,18 @@ class Settings:
     ollama_host: str = "http://127.0.0.1:11434"
     log_level: str = "INFO"
     max_agent_iterations: int = 10
+    max_step_retries: int = 2
+    max_replans: int = 3
     tool_timeout_seconds: float = 30.0
+    terminal_output_limit_bytes: int = 65_536
+    browser_allowed_hosts: tuple[str, ...] = ()
+    browser_search_url: str | None = None
+    browser_max_response_bytes: int = 1_048_576
+    browser_timeout_seconds: float = 15.0
+    rag_index_roots: tuple[Path, ...] = ()
+    rag_file_extensions: tuple[str, ...] = (".txt", ".md", ".rst", ".py", ".json", ".yaml", ".yml")
+    rag_chunk_size_chars: int = 1200
+    rag_chunk_overlap_chars: int = 200
     memory_database_location: Path = Path("data/memory/hermes.sqlite3")
     rag_database_location: Path = Path("data/rag/hermes.sqlite3")
     security_policy: SecurityPolicy = SecurityPolicy()
@@ -114,12 +125,38 @@ class Settings:
             raise ConfigurationError("log_level is invalid")
         if self.max_agent_iterations < 1 or self.max_agent_iterations > 1000:
             raise ConfigurationError("max_agent_iterations must be between 1 and 1000")
+        if self.max_step_retries < 0 or self.max_step_retries > 10:
+            raise ConfigurationError("max_step_retries must be between 0 and 10")
+        if self.max_replans < 0 or self.max_replans > 20:
+            raise ConfigurationError("max_replans must be between 0 and 20")
         if self.tool_timeout_seconds <= 0 or self.tool_timeout_seconds > 3600:
             raise ConfigurationError("tool_timeout_seconds must be between 0 and 3600")
+        if self.terminal_output_limit_bytes < 1024 or self.terminal_output_limit_bytes > 10 * 1024 * 1024:
+            raise ConfigurationError("terminal_output_limit_bytes must be between 1024 and 10485760")
+        if self.browser_max_response_bytes < 1024 or self.browser_max_response_bytes > 10 * 1024 * 1024:
+            raise ConfigurationError("browser_max_response_bytes must be between 1024 and 10485760")
+        if self.browser_timeout_seconds <= 0 or self.browser_timeout_seconds > 120:
+            raise ConfigurationError("browser_timeout_seconds must be between 0 and 120")
+        browser_hosts = tuple(host.strip().lower() for host in self.browser_allowed_hosts if host.strip())
+        if self.rag_chunk_size_chars < 100 or self.rag_chunk_size_chars > 100_000:
+            raise ConfigurationError("rag_chunk_size_chars must be between 100 and 100000")
+        if self.rag_chunk_overlap_chars < 0 or self.rag_chunk_overlap_chars >= self.rag_chunk_size_chars:
+            raise ConfigurationError("rag_chunk_overlap_chars must be smaller than chunk size")
+        extensions = tuple(
+            extension.lower() if extension.startswith(".") else f".{extension.lower()}"
+            for extension in self.rag_file_extensions
+            if extension.strip()
+        )
+        if not extensions:
+            raise ConfigurationError("rag_file_extensions must not be empty")
+        roots = tuple(_path_from(root, "rag_index_roots") for root in self.rag_index_roots)
         parsed_host = urlparse(self.ollama_host)
         if parsed_host.scheme not in {"http", "https"} or not parsed_host.netloc:
             raise ConfigurationError("ollama_host must be an HTTP(S) URL")
         object.__setattr__(self, "log_level", self.log_level.upper())
+        object.__setattr__(self, "browser_allowed_hosts", browser_hosts)
+        object.__setattr__(self, "rag_file_extensions", extensions)
+        object.__setattr__(self, "rag_index_roots", roots)
         object.__setattr__(self, "memory_database_location", _path_from(self.memory_database_location, "memory_database_location"))
         object.__setattr__(self, "rag_database_location", _path_from(self.rag_database_location, "rag_database_location"))
 
@@ -133,7 +170,43 @@ class Settings:
 
         try:
             max_agent_iterations = int(get("HERMES_MAX_AGENT_ITERATIONS", str(cls.max_agent_iterations)))
+            max_step_retries = int(get("HERMES_MAX_STEP_RETRIES", str(cls.max_step_retries)))
+            max_replans = int(get("HERMES_MAX_REPLANS", str(cls.max_replans)))
             tool_timeout_seconds = float(get("HERMES_TOOL_TIMEOUT_SECONDS", str(cls.tool_timeout_seconds)))
+            terminal_output_limit_bytes = int(
+                get("HERMES_TERMINAL_OUTPUT_LIMIT_BYTES", str(cls.terminal_output_limit_bytes))
+            )
+            browser_allowed_hosts = tuple(
+                host.strip()
+                for host in values.get("HERMES_BROWSER_ALLOWED_HOSTS", "").split(",")
+                if host.strip()
+            )
+            browser_search_url = values.get("HERMES_BROWSER_SEARCH_URL") or None
+            browser_max_response_bytes = int(
+                get("HERMES_BROWSER_MAX_RESPONSE_BYTES", str(cls.browser_max_response_bytes))
+            )
+            browser_timeout_seconds = float(
+                get("HERMES_BROWSER_TIMEOUT_SECONDS", str(cls.browser_timeout_seconds))
+            )
+            rag_index_roots = tuple(
+                _path_from(root, "rag_index_roots")
+                for root in _split(
+                    values["HERMES_RAG_INDEX_ROOTS"], "HERMES_RAG_INDEX_ROOTS"
+                )
+            ) if values.get("HERMES_RAG_INDEX_ROOTS") else ()
+            rag_file_extensions = tuple(
+                extension.strip()
+                for extension in values.get(
+                    "HERMES_RAG_FILE_EXTENSIONS", ",".join(cls.rag_file_extensions)
+                ).split(",")
+                if extension.strip()
+            )
+            rag_chunk_size_chars = int(
+                get("HERMES_RAG_CHUNK_SIZE_CHARS", str(cls.rag_chunk_size_chars))
+            )
+            rag_chunk_overlap_chars = int(
+                get("HERMES_RAG_CHUNK_OVERLAP_CHARS", str(cls.rag_chunk_overlap_chars))
+            )
             max_filesystem_file_size_bytes = int(
                 get(
                     "HERMES_MAX_FILESYSTEM_FILE_SIZE_BYTES",
@@ -150,7 +223,18 @@ class Settings:
             ollama_host=get("HERMES_OLLAMA_HOST", cls.ollama_host),
             log_level=get("HERMES_LOG_LEVEL", cls.log_level),
             max_agent_iterations=max_agent_iterations,
+            max_step_retries=max_step_retries,
+            max_replans=max_replans,
             tool_timeout_seconds=tool_timeout_seconds,
+            terminal_output_limit_bytes=terminal_output_limit_bytes,
+            browser_allowed_hosts=browser_allowed_hosts,
+            browser_search_url=browser_search_url,
+            browser_max_response_bytes=browser_max_response_bytes,
+            browser_timeout_seconds=browser_timeout_seconds,
+            rag_index_roots=rag_index_roots,
+            rag_file_extensions=rag_file_extensions,
+            rag_chunk_size_chars=rag_chunk_size_chars,
+            rag_chunk_overlap_chars=rag_chunk_overlap_chars,
             memory_database_location=Path(get("HERMES_MEMORY_DATABASE", str(cls.memory_database_location))),
             rag_database_location=Path(get("HERMES_RAG_DATABASE", str(cls.rag_database_location))),
             security_policy=SecurityPolicy.from_environment(values, max_filesystem_file_size_bytes),

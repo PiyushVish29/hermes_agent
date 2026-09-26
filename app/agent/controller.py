@@ -6,17 +6,30 @@ import logging
 import json
 import uuid
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from app import __version__
 from app.config.settings import Settings
-from app.agent.state import AgentEvent, AgentPlan, AgentState, AgentTask, ToolCall, ToolError, ToolResult
+from app.applications import ApplicationTool
+from app.browser import BrowserPolicy, BrowserTool
+from app.agent.state import (
+    AgentEvent,
+    AgentPlan,
+    AgentState,
+    AgentTask,
+    PlanStep,
+    PlanStepStatus,
+    ToolCall,
+    ToolError,
+    ToolResult,
+)
 from app.filesystem import ListDirectoryTool, PathSecurityLayer, ReadFileTool, SearchFilesTool
 from app.memory.manager import MemoryManager
-from app.memory.models import MemoryCandidate, MemoryCandidateStatus, MemoryTaskCheckpoint
+from app.memory.models import MemoryCandidate, MemoryCandidateStatus
 from app.models.provider import ModelError, ModelProvider, ModelRequest, ModelResponse, ToolDefinition
 from app.security.permissions import PermissionEngine, PermissionLevel, PermissionPolicy, PermissionRequest
+from app.terminal import TerminalTool
 from app.tools.base import ToolValidationError
 from app.tools.calculator import CalculatorTool
 from app.tools.registry import ToolRegistry
@@ -49,6 +62,9 @@ class AgentController:
     _active_iteration: int = field(default=1, init=False, repr=False)
     _pending_memory_candidate: MemoryCandidate | None = field(default=None, init=False, repr=False)
     _suspended_task_id: str | None = field(default=None, init=False, repr=False)
+    current_plan: AgentPlan | None = field(default=None, init=False)
+    plan_history: list[AgentPlan] = field(default_factory=list, init=False)
+    _replan_count: int = field(default=0, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.tool_registry is None:
@@ -60,6 +76,9 @@ class AgentController:
                 for name in self.tool_registry.names()
                 if name == "calculator"
             }
+            safe_defaults["terminal.development"] = PermissionLevel.SAFE
+            safe_defaults["browser.safe"] = PermissionLevel.SAFE
+            safe_defaults["application.safe"] = PermissionLevel.SAFE
             self.permission_engine = PermissionEngine(PermissionPolicy(safe_defaults))
         if self.tool_registry is not None and self.permission_engine is not None:
             security = PathSecurityLayer(self.settings.security_policy)
@@ -67,6 +86,24 @@ class AgentController:
                 ListDirectoryTool(security, self.permission_engine),
                 SearchFilesTool(security, self.permission_engine),
                 ReadFileTool(security, self.permission_engine),
+                TerminalTool(
+                    self.permission_engine,
+                    timeout_seconds=self.settings.tool_timeout_seconds,
+                    output_limit_bytes=self.settings.terminal_output_limit_bytes,
+                ),
+                BrowserTool(
+                    self.permission_engine,
+                    BrowserPolicy(
+                        allowed_hosts=self.settings.browser_allowed_hosts,
+                        search_url=self.settings.browser_search_url,
+                        max_response_bytes=self.settings.browser_max_response_bytes,
+                        timeout_seconds=self.settings.browser_timeout_seconds,
+                    ),
+                ),
+                ApplicationTool(
+                    self.permission_engine,
+                    timeout_seconds=self.settings.tool_timeout_seconds,
+                ),
             ):
                 if self.tool_registry.get(tool.name) is None:
                     self.tool_registry.register(tool)
@@ -111,6 +148,7 @@ class AgentController:
     ) -> ModelResponse:
         self._active_task = task
         self._active_conversation = conversation
+        self._replan_count = 0
         self.state = AgentState.IDLE
         self.events.clear()
         self._record(task, "task_started", AgentState.IDLE)
@@ -136,13 +174,25 @@ class AgentController:
                 self._record(task, "model_failed", self.state, iteration=iteration)
                 raise
 
+            tool_calls = tuple(
+                ToolCall(call.call_id, call.name, dict(call.arguments))
+                for call in response.tool_calls
+            )
             plan = AgentPlan(
                 task_id=task.task_id,
                 iteration=iteration,
-                tool_calls=tuple(
-                    ToolCall(call.call_id, call.name, dict(call.arguments))
-                    for call in response.tool_calls
+                steps=tuple(
+                    PlanStep(
+                        step_id=call.call_id,
+                        objective=f"Execute {call.name}",
+                        tool=call.name,
+                        arguments=call.arguments,
+                        expected_result="The registered tool completes successfully",
+                    )
+                    for call in tool_calls
                 ),
+                replan_count=self._replan_count,
+                tool_calls=tool_calls,
                 final_response=response.text if not response.tool_calls else None,
             )
             if plan.final_response is not None:
@@ -150,17 +200,89 @@ class AgentController:
                 self._record(task, "task_completed", self.state, iteration=iteration)
                 return response
 
+            self.current_plan = plan
+            self.plan_history.append(plan)
+            self._record(task, "plan_created", AgentState.THINKING, iteration=iteration, steps=len(plan.steps))
             self.state = AgentState.WAITING_FOR_APPROVAL
             self._record(task, "tool_requests_received", self.state, count=len(plan.tool_calls))
-            results = tuple(self._handle_tool_call(task, call, iteration) for call in plan.tool_calls)
+            completed, results = self._execute_plan(task, plan, iteration)
             self.state = AgentState.OBSERVING
             self._record(task, "tool_results_received", self.state, count=len(results))
             conversation = self._append_results(conversation, response, results)
             self._active_conversation = conversation
+            if not completed:
+                if self._replan_count >= self.settings.max_replans:
+                    self.state = AgentState.FAILED
+                    self._record(task, "replan_limit_reached", self.state, limit=self.settings.max_replans)
+                    raise RuntimeError("Agent maximum replans exceeded")
+                self._replan_count += 1
+                self._record(task, "plan_replanned", AgentState.THINKING, replan=self._replan_count)
 
         self.state = AgentState.FAILED
         self._record(task, "iteration_limit_reached", self.state, limit=task.max_iterations)
         raise RuntimeError("Agent maximum iterations exceeded")
+
+    def _execute_plan(
+        self,
+        task: AgentTask,
+        plan: AgentPlan,
+        iteration: int,
+    ) -> tuple[bool, tuple[ToolResult, ...]]:
+        """Execute steps in order, preserving successful steps across recovery."""
+        results: list[ToolResult] = []
+        current = plan
+        for index, step in enumerate(plan.steps):
+            attempts = 0
+            while attempts <= self.settings.max_step_retries:
+                attempts += 1
+                current = replace(
+                    current,
+                    current_step_index=index,
+                    retry_count=max(0, attempts - 1),
+                    steps=tuple(
+                        replace(item, status=PlanStepStatus.EXECUTING, attempts=attempts)
+                        if item.step_id == step.step_id
+                        else item
+                        for item in current.steps
+                    ),
+                )
+                self.current_plan = current
+                call = ToolCall(step.step_id, step.tool, step.arguments)
+                result = self._handle_tool_call(task, call, iteration)
+                results.append(result)
+                succeeded = self._verify_step(result)
+                updated_step = replace(
+                    step,
+                    actual_result=result,
+                    status=PlanStepStatus.SUCCEEDED if succeeded else PlanStepStatus.FAILED,
+                    attempts=attempts,
+                )
+                current = replace(
+                    current,
+                    steps=tuple(updated_step if item.step_id == step.step_id else item for item in current.steps),
+                )
+                self.current_plan = current
+                self._record(
+                    task,
+                    "step_observed",
+                    AgentState.OBSERVING,
+                    step=step.step_id,
+                    success=succeeded,
+                    attempt=attempts,
+                )
+                if succeeded:
+                    break
+                if attempts <= self.settings.max_step_retries:
+                    self._record(task, "step_retry", AgentState.THINKING, step=step.step_id, attempt=attempts)
+            else:
+                self._record(task, "step_failed", AgentState.FAILED, step=step.step_id)
+                return False, tuple(results)
+        return True, tuple(results)
+
+    @staticmethod
+    def _verify_step(result: ToolResult) -> bool:
+        """Verify only the structured result, never the model's assertion."""
+        return result.success
 
     def propose_memory_for_current_task(self, candidate: MemoryCandidate) -> MemoryCandidate:
         """Process a candidate and pause the active task if user approval is needed."""

@@ -4,7 +4,7 @@ Hermes Local is a privacy-first, Windows-focused AI computer agent. This reposit
 
 ## Milestone boundary
 
-The application does **not** execute arbitrary code, control the computer, browse the web, persist memory, or perform retrieval. It includes only bounded, read-only filesystem tools for configured roots: `list_directory`, `search_files`, and `read_file`.
+The application does **not** execute arbitrary code, provide unrestricted computer control, browse the web, persist memory, or perform retrieval. It includes bounded read-only filesystem tools, controlled browser actions, and explicit application lifecycle operations only.
 
 ## Architecture
 
@@ -13,13 +13,31 @@ The application does **not** execute arbitrary code, control the computer, brows
 - `app/models/`: provider-neutral model contracts, factory, and mock adapter. Future local or hosted adapters implement `ModelProvider`; the controller does not depend on a vendor SDK.
 - `app/tools/`: explicit tool contracts and `ToolRegistry`. Tools must be registered before they can be considered by future orchestration.
 - `app/filesystem/`: path security and read-only filesystem tools. Access is limited to configured roots, blocked sensitive paths, and a file-size limit.
+- `app/terminal/`: fixed-catalog, non-shell Windows development commands with timeout, cancellation, and output limits.
+- `app/browser/`: isolated, allowlisted browser actions with visible-text extraction and no arbitrary scripting.
+- `app/applications/`: explicit Windows application catalog with launch, status, focus, and approval-gated close operations.
 - `app/security/`: policy boundary. `PermissionEngine` currently denies all requests by default.
 - `app/memory/`: short-term session context and approval-gated SQLite long-term memory.
+- `app/rag/`: separate approved-document indexing, local embeddings, chunk retrieval, and source references.
 - `app/rag/`: future retrieval boundary over approved local indexes.
 - `app/config/`: typed, allowlisted environment configuration.
 - `app/utils/`: shared infrastructure such as logging.
 - `data/`: reserved local runtime areas for memory, RAG indexes, logs, and sandbox data.
 - `tests/`: smoke tests for the foundation.
+
+## Planning loop
+
+Agent work follows:
+
+`Goal -> Plan -> Execute -> Observe -> Verify -> Continue or Replan`
+
+Each `PlanStep` records its objective, registered tool, arguments, expected
+result, actual structured result, status, and attempts. Successful steps remain
+in `plan_history`; only failed steps are retried. Once the configured retry
+limit is reached, Hermes asks the model for a revised plan subject to the
+configured replan limit. Every recovery tool request goes through the same
+validation and PermissionEngine path. Memory approval pauses preserve the exact
+task checkpoint before execution resumes.
 
 ## Dependency choices
 
@@ -39,7 +57,7 @@ implemented.
 
 ## Security boundaries
 
-The model must never become the security boundary. Future model output will be treated as untrusted intent. The agent layer will request named tools, the registry will expose only approved tools, and the permission engine will make explicit policy decisions before execution. No unrestricted filesystem, write, delete, shell, Python, PowerShell, CMD, browser, or desktop-control capability exists in this milestone. Filesystem access is always resolved and permission-checked before I/O.
+The model must never become the security boundary. Future model output will be treated as untrusted intent. The agent layer will request named tools, the registry will expose only approved tools, and the permission engine will make explicit policy decisions before execution. No unrestricted filesystem, write, delete, shell, Python, PowerShell, CMD, arbitrary browser scripting, mouse/keyboard automation, or desktop-control capability exists in this milestone. Filesystem access is always resolved and permission-checked before I/O; terminal and application operations come only from fixed harmless catalogs.
 
 ## Configuration
 
@@ -47,8 +65,8 @@ Copy `.env.example` to `.env` and export those values before starting Hermes.
 `HERMES_ALLOWED_FILESYSTEM_ROOTS` is required; Hermes fails closed when that
 security setting is missing or unsafe. Roots are separated with `;` on Windows.
 The default root is only `data/sandbox`, never the user's entire filesystem.
-Database paths are reserved for future persistence and are not accessed in this
-milestone.
+The memory database is used for approved long-term memories; the RAG database
+path remains reserved for future retrieval persistence.
 
 Example (no secrets are required):
 
@@ -58,12 +76,24 @@ HERMES_MODEL=llama3.2
 HERMES_OLLAMA_HOST=http://127.0.0.1:11434
 HERMES_LOG_LEVEL=INFO
 HERMES_MAX_AGENT_ITERATIONS=10
+HERMES_MAX_STEP_RETRIES=2
+HERMES_MAX_REPLANS=3
 HERMES_TOOL_TIMEOUT_SECONDS=30
+HERMES_TERMINAL_OUTPUT_LIMIT_BYTES=65536
+HERMES_BROWSER_ALLOWED_HOSTS=
+HERMES_BROWSER_SEARCH_URL=
+HERMES_BROWSER_MAX_RESPONSE_BYTES=1048576
+HERMES_BROWSER_TIMEOUT_SECONDS=15
 HERMES_ALLOWED_FILESYSTEM_ROOTS=data/sandbox
 HERMES_BLOCKED_FILESYSTEM_PATTERNS=**/.env;**/.ssh/**;**/*.key;**/*.pem
 HERMES_MAX_FILESYSTEM_FILE_SIZE_BYTES=1048576
 HERMES_MEMORY_DATABASE=data/memory/hermes.sqlite3
 HERMES_RAG_DATABASE=data/rag/hermes.sqlite3
+# Optional: leave empty to disable indexing until roots are explicitly selected.
+HERMES_RAG_INDEX_ROOTS=
+HERMES_RAG_FILE_EXTENSIONS=.txt,.md,.rst,.py,.json,.yaml,.yml
+HERMES_RAG_CHUNK_SIZE_CHARS=1200
+HERMES_RAG_CHUNK_OVERLAP_CHARS=200
 ```
 
 ## Run
@@ -89,8 +119,8 @@ With `--chat`, the flow is:
 Hermes sends each text prompt through the configured provider to Ollama and
 prints the normalized response. Only registered tools can be requested, every
 request is permission-checked, and failures are returned to the model as
-structured results so it can recover. No filesystem, terminal, browser, or
-computer-control tools exist at this stage.
+structured results so it can recover. The terminal tool exposes only
+explicitly catalogued harmless development commands and never invokes a shell.
 
 ## Test
 

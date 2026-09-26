@@ -1,11 +1,17 @@
-"""Future local retrieval interface."""
+"""Local retrieval interface backed by the separate RAG database."""
 
 from __future__ import annotations
 
 
-class Retriever:
-    """Placeholder for bounded retrieval over approved local indexes."""
+from app.rag.manager import RagManager
+from app.rag.models import RagSearchResult
 
-    def search(self, query: str) -> list[str]:
-        """Search approved indexes once a RAG backend is selected."""
-        raise NotImplementedError("RAG is not implemented")
+
+class Retriever:
+    """Provider-neutral retrieval facade; it never reads personal memory."""
+
+    def __init__(self, manager: RagManager) -> None:
+        self.manager = manager
+
+    def search(self, query: str, limit: int = 5) -> tuple[RagSearchResult, ...]:
+        return self.manager.retrieve(query, limit=limit)

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Iterable
-
 from app.memory.models import MemoryCandidate, MemoryCategory, MemoryDecision, MemoryRecord, MemoryCandidateStatus
 from app.memory.policy import MemoryPolicy
 from app.memory.storage import MemoryStorage

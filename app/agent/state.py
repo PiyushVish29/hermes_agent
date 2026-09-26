@@ -19,6 +19,14 @@ class AgentState(str, Enum):
     CANCELLED = "cancelled"
 
 
+class PlanStepStatus(str, Enum):
+    PENDING = "pending"
+    EXECUTING = "executing"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
 @dataclass(frozen=True)
 class AgentTask:
     """Immutable user goal and execution bound."""
@@ -30,12 +38,30 @@ class AgentTask:
 
 @dataclass(frozen=True)
 class AgentPlan:
-    """The current model decision represented independently of a provider."""
+    """A provider-neutral plan with observable step state."""
 
     task_id: str
     iteration: int
+    steps: tuple["PlanStep", ...] = ()
+    current_step_index: int = 0
+    retry_count: int = 0
+    replan_count: int = 0
     tool_calls: tuple["ToolCall", ...] = ()
     final_response: str | None = None
+
+
+@dataclass(frozen=True)
+class PlanStep:
+    """One objective, tool request, expected outcome, and observed result."""
+
+    step_id: str
+    objective: str
+    tool: str
+    arguments: dict[str, Any]
+    expected_result: str
+    actual_result: Any = None
+    status: PlanStepStatus = PlanStepStatus.PENDING
+    attempts: int = 0
 
 
 @dataclass(frozen=True)
